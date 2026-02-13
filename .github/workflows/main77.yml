@@ -1,0 +1,79 @@
+name: Create Secure Windows RDP (Pinggy)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  create-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      # ────── ۱. فعال کردن RDP و کاربر ──────
+      - name: Enable RDP + Set Credentials
+        shell: pwsh
+        run: |
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
+          net user runneradmin /active:yes
+          net user runneradmin "@SecureRDP2026"   # ← رمز دلخواهت رو عوض کن
+
+      # ────── ۲. راه‌اندازی Pinggy Tunnel (ساده‌ترین روش) ──────
+      - name: Start Pinggy Tunnel
+        shell: pwsh
+        run: |
+          Write-Host "🚀 در حال راه‌اندازی Pinggy Tunnel..." -ForegroundColor Cyan
+          
+          # شروع تونل در پس‌زمینه
+          $tunnel = Start-Process -FilePath "ssh" `
+            -ArgumentList "-p 443 -R0:127.0.0.1:3389 -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=5 tcp@free.pinggy.io" `
+            -PassThru -NoNewWindow -RedirectStandardOutput "pinggy.log" -RedirectStandardError "pinggy.err"
+          
+          Write-Host "⏳ منتظر بمون تا تونل آماده بشه (۱۰ ثانیه)..." -ForegroundColor Yellow
+          Start-Sleep -Seconds 15
+          
+          # نمایش آدرس تونل
+          if (Test-Path "pinggy.log") {
+              $log = Get-Content "pinggy.log" -Raw
+              $url = [regex]::Match($log, 'tcp://[a-z0-9.-]+:\d+').Value
+              if ($url) {
+                  Write-Host "`n✅ تونل Pinggy آماده شد!" -ForegroundColor Green
+                  Write-Host "🌐 آدرس اتصال: $url" -ForegroundColor White
+              } else {
+                  Write-Host "⚠️ آدرس تونل پیدا نشد. لاگ کامل:" -ForegroundColor Red
+                  Get-Content "pinggy.log"
+              }
+          } else {
+              Write-Host "❌ لاگ پیدا نشد. لاگ کامل:" -ForegroundColor Red
+              Get-Content "pinggy.err"
+          }
+
+      # ────── ۳. نمایش اطلاعات نهایی ──────
+      - name: RDP Connection Info
+        shell: pwsh
+        run: |
+          Write-Host "`n[=============================================================]" -ForegroundColor Magenta
+          Write-Host "                  🔐 Windows RDP با Pinggy آماده شد!                  " -ForegroundColor Cyan
+          Write-Host "[=============================================================]`n" -ForegroundColor Magenta
+
+          Write-Host "👤 Username     : " -NoNewline -ForegroundColor Green
+          Write-Host "runneradmin" -ForegroundColor White
+
+          Write-Host "🔑 Password     : " -NoNewline -ForegroundColor Green
+          Write-Host "@SecureRDP2026" -ForegroundColor White
+
+          Write-Host "`n📌 نحوه اتصال:" -ForegroundColor Yellow
+          Write-Host "   ۱. توی لاگ‌های workflow بالا، آدرس رو پیدا کن (مثل tcp://xxxx.pinggy.link:yyyyy)" -ForegroundColor White
+          Write-Host "   ۲. توی Remote Desktop (کامپیوتر یا گوشی) اینو بزن:" -ForegroundColor White
+          Write-Host "      Computer: آدرس کامل (مثلاً tcp://xxxx.pinggy.link:yyyyy)" -ForegroundColor White
+          Write-Host "      Username: runneradmin" -ForegroundColor White
+          Write-Host "      Password: @SecureRDP2026" -ForegroundColor White
+
+          Write-Host "`n✅ برو حالشو ببر! (تا ۶ ساعت)" -ForegroundColor Green
+          Write-Host "[=============================================================]`n" -ForegroundColor Magenta
+
+      # ────── ۴. نگه داشتن زنده ──────
+      - name: Keep Runner Alive
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 21600
