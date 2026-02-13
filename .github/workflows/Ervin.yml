@@ -1,0 +1,146 @@
+name: Secure RDP via Tailscale
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    name: Create Secure Windows RDP
+    runs-on: windows-latest
+    timeout-minutes: 4320   # حداکثر ۷۲ ساعت (حد مجاز GitHub)
+
+    steps:
+      - name: Enable RDP + Open Firewall
+        shell: powershell
+        run: |
+          Write-Host "Enabling RDP and configuring firewall..." -ForegroundColor Cyan
+
+          # فعال کردن RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" -Value 0 -Force
+
+          # غیرفعال کردن NLA (برای اتصال راحت‌تر)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" -Value 0 -Force
+          
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "SecurityLayer" -Value 0 -Force
+
+          # پاک کردن قانون قبلی (اگر وجود داشته باشد)
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+
+          # باز کردن پورت 3389 فقط برای Tailscale (امن)
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          # ری‌استارت سرویس RDP
+          Restart-Service -Name TermService -Force
+
+          Write-Host "RDP enabled successfully" -ForegroundColor Green
+
+      - name: Create Strong RDP User
+        shell: powershell
+        run: |
+          Write-Host "Creating RDP user..." -ForegroundColor Cyan
+
+          # تولید پسورد خیلی قوی (۱۶ کاراکتر، ترکیبی)
+          Add-Type -AssemblyName System.Web
+          $password = [System.Web.Security.Membership]::GeneratePassword(16, 4)
+
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          # ساخت کاربر
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires:$true -PasswordNeverExpires:$true
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+
+          # مخفی کردن پسورد در لاگ GitHub
+          Write-Output "::add-mask::$password"
+
+          # ذخیره در Environment
+          echo "RDP_USER=RDP" >> $env:GITHUB_ENV
+          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+
+          Write-Host "RDP user created successfully" -ForegroundColor Green
+
+      - name: Install Tailscale (Latest)
+        shell: powershell
+        run: |
+          Write-Host "Installing Tailscale..." -ForegroundColor Cyan
+
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-amd64.msi"
+          $installer = "$env:TEMP\tailscale.msi"
+
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installer -UseBasicParsing
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installer`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installer -Force
+
+          Write-Host "Tailscale installed" -ForegroundColor Green
+
+      - name: Connect to Tailscale
+        shell: powershell
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          Write-Host "Connecting to Tailscale..." -ForegroundColor Cyan
+
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+            --authkey=$env:TAILSCALE_AUTH_KEY `
+            --hostname="gh-rdp-${{ github.run_id }}" `
+            --accept-routes=false `
+            --accept-dns=false
+
+          # گرفتن IP Tailscale
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 15) {
+              Start-Sleep -Seconds 3
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              $retries++
+          }
+
+          if (-not $tsIP) {
+              Write-Error "Failed to get Tailscale IP"
+              exit 1
+          }
+
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Write-Host "Connected to Tailscale → $tsIP" -ForegroundColor Green
+
+      - name: Verify RDP Port
+        shell: powershell
+        run: |
+          Write-Host "Verifying RDP accessibility..." -ForegroundColor Cyan
+          
+          $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          
+          if ($test.TcpTestSucceeded) {
+              Write-Host "RDP is ready on port 3389" -ForegroundColor Green
+          } else {
+              Write-Error "RDP port is not accessible"
+              exit 1
+          }
+
+      - name: RDP Connection Info
+        shell: powershell
+        run: |
+          Write-Host "`n" -NoNewline
+          Write-Host "╔══════════════════════════════════════════════╗" -ForegroundColor Magenta
+          Write-Host "║           RDP ACCESS INFORMATION             ║" -ForegroundColor Magenta
+          Write-Host "╠══════════════════════════════════════════════╣" -ForegroundColor Magenta
+          Write-Host "║ Address   : $env:TAILSCALE_IP                 ║" -ForegroundColor White
+          Write-Host "║ Username  : $env:RDP_USER                     ║" -ForegroundColor White
+          Write-Host "║ Password  : $env:RDP_PASS                     ║" -ForegroundColor White
+          Write-Host "╚══════════════════════════════════════════════╝" -ForegroundColor Magenta
+          Write-Host "`nConnect using Microsoft Remote Desktop or any RDP client.`n" -ForegroundColor Yellow
+          Write-Host "Tailscale must be running on your device.`n" -ForegroundColor Yellow
+
+      - name: Keep Runner Alive
+        shell: powershell
+        run: |
+          Write-Host "RDP session is now active. Workflow will stay alive until manually cancelled." -ForegroundColor Green
+          
+          while ($true) {
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] RDP is still running..." -ForegroundColor DarkGray
+              Start-Sleep -Seconds 180
+          }
