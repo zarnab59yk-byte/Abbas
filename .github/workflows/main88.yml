@@ -1,0 +1,98 @@
+name: Secure Windows RDP - 24/7 Auto Restart
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */5 * * *'   # هر ۵ ساعت
+
+jobs:
+  create-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 300
+
+    steps:
+      # ────── ۱. Tailscale (اگه داری) ──────
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+
+      # ────── ۲. فعال کردن RDP ──────
+      - name: Enable RDP + Set Credentials
+        shell: pwsh
+        run: |
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
+          net user runneradmin /active:yes
+          net user runneradmin "@SecureRDP2026"   # ← رمز دلخواهت
+
+      # ────── ۳. Pinggy Tunnel (نسخه قوی و بدون خطا) ──────
+      - name: Start Pinggy Tunnel
+        shell: pwsh
+        run: |
+          Write-Host "🚀 راه‌اندازی Pinggy Tunnel..." -ForegroundColor Cyan
+
+          # شروع تونل
+          Start-Process -FilePath "ssh" `
+            -ArgumentList "-p 443 -R0:127.0.0.1:3389 -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=5 tcp@free.pinggy.io" `
+            -PassThru -NoNewWindow -RedirectStandardOutput "pinggy.log" -RedirectStandardError "pinggy.err"
+
+          # صبر هوشمندانه تا آدرس ظاهر بشه (حداکثر ۳۰ ثانیه)
+          $timeout = 30
+          $start = Get-Date
+          $url = $null
+
+          while (((Get-Date) - $start).TotalSeconds -lt $timeout) {
+              if (Test-Path "pinggy.log") {
+                  $log = Get-Content "pinggy.log" -Raw -ErrorAction SilentlyContinue
+                  if ($log) {
+                      $match = [regex]::Match($log, 'tcp://[a-z0-9.-]+:\d+')
+                      if ($match.Success) {
+                          $url = $match.Value
+                          break
+                      }
+                  }
+              }
+              Start-Sleep -Seconds 3
+          }
+
+          if ($url) {
+              Write-Host "✅ Pinggy آماده شد!" -ForegroundColor Green
+              Write-Host "🌐 آدرس اتصال: $url" -ForegroundColor White
+          } else {
+              Write-Host "⚠️ آدرس پیدا نشد (لاگ کامل):" -ForegroundColor Yellow
+              Get-Content "pinggy.log" -ErrorAction SilentlyContinue
+              Get-Content "pinggy.err" -ErrorAction SilentlyContinue
+          }
+
+      # ────── ۴. نمایش اطلاعات ──────
+      - name: RDP Connection Info
+        shell: pwsh
+        run: |
+          Write-Host "`n[=============================================================]" -ForegroundColor Magenta
+          Write-Host "             🔐 RDP ۲۴ ساعته آماده!             " -ForegroundColor Cyan
+          Write-Host "[=============================================================]`n" -ForegroundColor Magenta
+
+          $tsIP = (tailscale ip -4) 2>$null
+          if ($tsIP) { Write-Host "🌐 Tailscale IP : $tsIP" -ForegroundColor Green }
+
+          if (Test-Path "pinggy.log") {
+              $log = Get-Content "pinggy.log" -Raw
+              $pinggy = [regex]::Match($log, 'tcp://[a-z0-9.-]+:\d+').Value
+              if ($pinggy) { Write-Host "🔗 Pinggy Address : $pinggy" -ForegroundColor Green }
+          }
+
+          Write-Host "👤 Username : runneradmin" -ForegroundColor Green
+          Write-Host "🔑 Password : @SecureRDP2026" -ForegroundColor Green
+
+          Write-Host "`n✅ سرور ۲۴ ساعته فعاله (هر ۵ ساعت restart خودکار)" -ForegroundColor Green
+          Write-Host "[=============================================================]`n" -ForegroundColor Magenta
+
+      # ────── ۵. Auto Restart ──────
+      - name: Auto Restart
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+        run: |
+          gh workflow run ${{ github.workflow }} --ref ${{ github.ref_name }}
